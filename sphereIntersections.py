@@ -8,7 +8,7 @@ world = []
 class camera:
 	def facePoint(self, coords):
 		theta, phi, _ = cartesian2Spherical(coords[0] - self.origin[0], coords[1] - self.origin[1], coords[2] - self.origin[2])
-		self.rotate(theta - self.theta, phi - self.phi)
+		self.rotate(phi - self.phi, theta - self.theta)
 
 	def faceDir(self, theta, phi):
 		self.rotate(theta - self.theta, phi - self.phi)
@@ -22,6 +22,7 @@ class camera:
 		self.coords[:,:,0] = self.screen[:, :, 0] * Matrix[0, 0] + self.screen[:, :, 1] * Matrix[0, 1] + self.screen[:, :, 2] * Matrix[0, 2]
 		self.coords[:,:,1] = self.screen[:, :, 0] * Matrix[1, 0] + self.screen[:, :, 1] * Matrix[1, 1] + self.screen[:, :, 2] * Matrix[1, 2]
 		self.coords[:,:,2] = self.screen[:, :, 0] * Matrix[2, 0] + self.screen[:, :, 1] * Matrix[2, 1] + self.screen[:, :, 2] * Matrix[2, 2]
+		self.coords = parallelNormalizeVector(self.coords)
 		
 	def __init__(self, theta, phi, fov, resolution, x, y, z):
 		self.origin = np.array([x, y, z], np.float32)
@@ -45,6 +46,7 @@ class camera:
 		r = Sphere[3]
 		
 		Sphere = np.array(Sphere, np.float32)[:3] - self.origin
+		# ~ print(Sphere)
 		vect = (self.coords) * 1
 		maggs = np.amax(np.absolute(vect), 2)
 		
@@ -71,14 +73,13 @@ class camera:
 		
 		inters = self.coords * 0
 		
-		inters[:,:,0] = ans * vect[:, :, 0] + self.origin[0]
-		inters[:,:,1] = ans * vect[:, :, 1] + self.origin[1]
-		inters[:,:,2] = ans * vect[:, :, 2] + self.origin[2]
+		inters[:,:,0] = ans * vect[:, :, 0] #+ self.origin[0]
+		inters[:,:,1] = ans * vect[:, :, 1] #+ self.origin[1]
+		inters[:,:,2] = ans * vect[:, :, 2] #+ self.origin[2]
 		# ~ start = time.time()
 		conda = np.logical_xor(self.coords < 0, inters > 0)
 		cond = 1 - np.logical_and(conda[:,:,0], np.logical_and(conda[:,:,1], conda[:,:,2]))
 		truths = np.logical_or(cond, truths)
-		
 		return truths, inters
 		
 	def RenderSpheres(self, objects):
@@ -93,43 +94,62 @@ class camera:
 			AllTruths = np.logical_and(truths, AllTruths)
 			dists = np.sqrt(np.sum(newInters**2, axis=-1))
 			cond = np.logical_and(np.logical_or(dists < Distances, Distances == 0), dists != 0)
-			# ~ intersections[cond] = newInters[cond]
 			Distances[cond] = dists[cond]
 			norm[cond] = LocalNorms[cond]
-		# ~ Distances[Distances == 0] = 0
-		frame = np.sum(norm*self.coords, axis=-1) * -1 - normalize(Distances) * distancePower
-		frame[AllTruths] = np.min(frame)
+		bright = np.sum(parallelNormalizeVector(norm) * self.coords, axis = -1) - Distances
+		bright -= np.min(bright)
+		norm -= np.min(norm)
+		bright[AllTruths] = 0
+		norm[AllTruths] = self.coords[AllTruths] - 100
+		frame = norm * 1
+		frame[:,:,0] *= bright
+		frame[:,:,1] *= bright
+		frame[:,:,2] *= bright
 		self.frame = normalize(frame)
 		show(self.frame, 1)
 			
-			
-			
-			
-			
 
-		
-		# ~ return inters, truths
-GravityConstant = 1
-DTime = 1 / 240
+elasticity = 0.99
+
+
+
+
+GravityConstant = 6.67408e-11
+DTime = 1 / 5000
 class HeavenlyBody:
 	def __init__(self, location, radius, density = 1, velocityVect = [0, 0, 0]):
 		self.mass = 4/3 * math.pi * radius**3 * density
 		self.radius = radius
 		self.location = location
 		self.velocity = velocityVect
+		self.FrameForce = self.velocity*0
 		
-	def updateVelocity(self, others):
+	def updateFrameForce(self, others):
 		Force = self.velocity * 0
 		for a in others:
-			F = (a.mass * self.mass * GravityConstant)/((self.location[0] - a.location[0]) ** 2 + (self.location[1] - a.location[1]) ** 2 + (self.location[2] - a.location[2]) ** 2)
+			massRatio = self.mass / (self.mass + a.mass)
+			r = ((self.location[0] - a.location[0]) ** 2 + (self.location[1] - a.location[1]) ** 2 + (self.location[2] - a.location[2]) ** 2)**0.5
+			F = (a.mass * self.mass * GravityConstant) / r**2
 			T, P, _ = cartesian2Spherical(a.location[0] - self.location[0], a.location[1] - self.location[1], a.location[2] - self.location[2])
 			Xm, Ym, Zm = spherical2Cartesian(T, P, F)
-			Force += np.array([Xm, Ym, Zm], np.float32) * DTime
-		self.velocity += Force
-		
+			if(r < self.radius + a.radius):
+				n = normalizeVector(self.location - a.location)
+				dot = np.sum(self.velocity * n)
+				if(dot < 0):
+					Force -= self.velocity
+					newDirection = normalizeVector(self.velocity - 2 * dot * n)
+					Pself = self.velocity * self.mass
+					Pother = a.velocity * a.mass
+					TotalMagnitude = getVectorMagnitude(Pself) + getVectorMagnitude(Pother)
+					Force += newDirection * (TotalMagnitude * massRatio) / self.mass * elasticity
+			else:
+				Force += (np.array([Xm, Ym, Zm], np.float64) * massRatio * a.mass / self.mass) * DTime
+		self.FrameForce = Force
+
 	def updatePosition(self):
+		self.velocity += self.FrameForce
 		self.location += self.velocity * DTime
-		
+
 	def asSphere(self):
 		return np.array([self.location[0], self.location[1], self.location[2], self.radius], np.float32)
 
@@ -157,16 +177,30 @@ def cartesian2Spherical(x, y, z):
 	
 def spherical2Cartesian(theta, phi, rho = 1):
 	return rho * np.cos(theta) * np.sin(phi), rho * np.sin(theta) * np.sin(phi), rho * np.cos(phi)
+	
+def getVectorMagnitude(Vect):
+	return np.sum(np.power(Vect, 2)) ** 0.5
+	
+def normalizeVector(Vect):
+	t = np.arctan2(Vect[1], Vect[0])
+	p = np.arctan2(np.sqrt(np.power(Vect[0], 2) + np.power(Vect[1], 2)), Vect[2])
+	return np.array([np.cos(t) * np.sin(p), np.sin(t) * np.sin(p), np.cos(p)], np.float32)
 
-
+def parallelNormalizeVector(Vect):
+	t = np.arctan2(Vect[:,:,1], Vect[:,:,0])
+	p = np.arctan2(np.sqrt(np.power(Vect[:,:,0], 2) + np.power(Vect[:,:,1], 2)), Vect[:,:,2])
+	Vect[:,:,0] = np.cos(t) * np.sin(p)
+	Vect[:,:,1] = np.sin(t) * np.sin(p)
+	Vect[:,:,2] = np.cos(p)
+	return Vect
 
 
 XT = 0
 YT = 0
 ZT = 0
 
-neptune = HeavenlyBody(np.array([50, 0, 100], np.float32), 10, 1, np.array([-200, -200, 0], np.float32))
-saturn = HeavenlyBody(np.array([-50, 0, 100], np.float32), 10, 1, np.array([200, 200, 0], np.float32))
+neptune = HeavenlyBody(np.array([-20, -10, 40], np.float32), 12, 5, np.array([400, 0, 0], np.float32))
+saturn = HeavenlyBody(np.array([20, 0, 40], np.float32), 10, 5, np.array([-400, 0, 0], np.float32))
 # ~ uranus = HeavenlyBody(np.array([0, 0, 100], np.float32), 2, 1, np.array([0, 0, 0], np.float32))
 
 
@@ -175,8 +209,8 @@ theta = 0
 phi = 0
 fov = 120
 fov = fov / 180 * math.pi
-w = 300
-h = 300
+w = 600
+h = 600
 cam = camera(theta, phi, fov, [w,h], XT, YT, ZT)
 x = 0
 import time
@@ -184,12 +218,13 @@ import time
 while True:
 	start = time.time()
 	cam.RenderSpheres([neptune.asSphere(), saturn.asSphere()])
-	neptune.updateVelocity([saturn])
-	saturn.updateVelocity([neptune])
+	# ~ cam.facePoint(saturn.location)
+	neptune.updateFrameForce([saturn])
+	saturn.updateFrameForce([neptune])
 	# ~ uranus.updateVelocity([saturn, neptune])
 	neptune.updatePosition()
 	saturn.updatePosition()
-	# ~ uranus.updatePosition()
+	# ~ print(getVectorMagnitude(neptune.velocity * neptune.mass) + getVectorMagnitude(saturn.velocity * saturn.mass), end = "\r")
 	end = time.time()
 	print(f"{int(1 / (end - start))}fps    ", end = "\r")
 	# ~ frames.append(cam.frame)
